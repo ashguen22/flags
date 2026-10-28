@@ -1,6 +1,8 @@
 ---
 title: "World Flags Explorer & Trivia"
 format: html
+resources:
+  - "flags/*.png"
 execute:
   echo: false
   warning: false
