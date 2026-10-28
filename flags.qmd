@@ -1,0 +1,329 @@
+---
+title: "World Flags Explorer & Trivia"
+format: html
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+library(tidyverse)
+library(sf)
+
+# Load world map polygons for drawing the interactive map in Observable JS
+ne_small <- rnaturalearth::ne_countries(scale = "small", returnclass = "sf") |>
+  mutate(code = tolower(ifelse(iso_a2_eh != "-99", iso_a2_eh, iso_a2))) |>
+  select(code, name, geometry)
+
+tf <- tempfile(fileext = ".geojson")
+st_write(ne_small, tf, driver = "GeoJSON", quiet = TRUE)
+world_geojson <- paste(readLines(tf, warn = FALSE), collapse = "\n")
+
+# Load detailed country metadata and compute land area + global rankings
+ne_med <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") |>
+  st_make_valid() |>
+  mutate(
+    code = tolower(ifelse(iso_a2_eh != "-99", iso_a2_eh, iso_a2)),
+    area_km2 = round(as.numeric(st_area(geometry)) / 1e6)
+  ) |>
+  st_drop_geometry() |>
+  distinct(code, .keep_all = TRUE) |>
+  mutate(
+    area_rank = min_rank(desc(area_km2)),
+    pop_rank = min_rank(desc(pop_est))
+  )
+
+# Get currency and ISO-3 codes from countrycode
+cl <- countrycode::codelist |>
+  transmute(
+    code = tolower(iso2c),
+    cl_name = country.name.en,
+    currency = currency,
+    iso3 = iso3c
+  ) |>
+  filter(!is.na(code)) |>
+  distinct(code, .keep_all = TRUE)
+
+# Get capital cities from maps::world.cities
+capitals <- maps::world.cities |>
+  filter(capital == 1) |>
+  mutate(iso3 = countrycode::countrycode(country.etc, "country.name", "iso3c", warn = FALSE)) |>
+  filter(!is.na(iso3)) |>
+  arrange(desc(pop)) |>
+  distinct(iso3, .keep_all = TRUE) |>
+  select(iso3, capital_city = name)
+
+# Fallback coordinates, capitals, and facts for territories and UK nations
+extra <- tribble(
+  ~code, ~extra_name, ~extra_region, ~extra_capital, ~extra_currency, ~lon_ex, ~lat_ex, ~extra_fact,
+  "bq", "Caribbean Netherlands", "Caribbean (Americas)", "Kralendijk (Bonaire)", "US Dollar", -68.26, 12.17, "Consists of three special municipalities of the Netherlands in the Caribbean: Bonaire, Sint Eustatius, and Saba (home to Mount Scenery, the highest point in the Kingdom of the Netherlands).",
+  "bv", "Bouvet Island", "South Atlantic Ocean", "None (uninhabited)", "Norwegian Krone", 3.36, -54.42, "An uninhabited subantarctic volcanic island and dependency of Norway, often described as the most remote island on Earth—over 1,600 km from the nearest land.",
+  "cc", "Cocos (Keeling) Islands", "Indian Ocean (Oceania)", "West Island", "Australian Dollar", 96.83, -12.16, "An Australian external territory made up of two coral atolls and 27 islands, of which only West Island and Home Island are inhabited.",
+  "cx", "Christmas Island", "Indian Ocean (Oceania)", "Flying Fish Cove", "Australian Dollar", 105.69, -10.45, "An Australian territory in the Indian Ocean famous for the annual migration of around 40 to 50 million red land crabs from the forest to the coast.",
+  "gb-eng", "England", "Northern Europe", "London", "Pound Sterling", -1.17, 52.36, "The largest and most populous country of the United Kingdom, home to London, Stonehenge, and the St George's Cross flag dating back to the Middle Ages.",
+  "gb-nir", "Northern Ireland", "Northern Europe", "Belfast", "Pound Sterling", -6.49, 54.79, "Part of the United Kingdom in the northeast of the island of Ireland, famous for the Giant's Causeway of roughly 40,000 interlocking volcanic basalt columns.",
+  "gb-sct", "Scotland", "Northern Europe", "Edinburgh", "Pound Sterling", -4.20, 56.49, "Covers the northern third of Great Britain and includes more than 790 islands; its Saltire flag (St Andrew's Cross) is one of the oldest national flags still in use.",
+  "gb-wls", "Wales", "Northern Europe", "Cardiff", "Pound Sterling", -3.78, 52.13, "A mountainous country of the United Kingdom with more castles per square mile than almost anywhere else in the world and a famous Red Dragon (Y Ddraig Goch) on its flag.",
+  "gf", "French Guiana", "South America", "Cayenne", "Euro", -53.13, 3.93, "An overseas department of France on the northeast coast of South America, densely covered in equatorial rainforest and home to Europe's spaceport at Kourou.",
+  "gi", "Gibraltar", "Southern Europe", "Gibraltar", "Gibraltar Pound", -5.35, 36.14, "A British Overseas Territory at the southern tip of the Iberian Peninsula, dominated by the Rock of Gibraltar and home to Europe's only wild monkey population (Barbary macaques).",
+  "gp", "Guadeloupe", "Caribbean (Americas)", "Basse-Terre", "Euro", -61.55, 16.27, "A butterfly-shaped archipelago and French overseas region in the southern Caribbean Sea, dominated by the active La Soufrière volcano.",
+  "mq", "Martinique", "Caribbean (Americas)", "Fort-de-France", "Euro", -61.02, 14.64, "A rugged Caribbean island and overseas region of France, famous for Mount Pelée and a rich blend of French and Antillean Creole culture.",
+  "re", "Réunion", "Eastern Africa (Indian Ocean)", "Saint-Denis", "Euro", 55.54, -21.12, "A French island department in the Indian Ocean east of Madagascar, home to Piton de la Fournaise, one of the most active volcanoes on Earth.",
+  "sj", "Svalbard and Jan Mayen", "Northern Europe (Arctic)", "Longyearbyen", "Norwegian Krone", 20.98, 77.55, "Norwegian Arctic islands far north of mainland Europe; Svalbard houses the Global Seed Vault and is famous for having more polar bears than permanent residents.",
+  "tk", "Tokelau", "Polynesia (Oceania)", "Fakaofo (rotating)", "New Zealand Dollar", -171.86, -9.20, "A remote dependent territory of New Zealand consisting of three tropical coral atolls in the South Pacific that became the first territory powered 100% by solar energy.",
+  "um", "U.S. Minor Outlying Islands", "Pacific & Caribbean", "None (administered from Washington, D.C.)", "US Dollar", -169.53, 16.75, "Eleven small United States island territories—eight in the Pacific Ocean (including Midway and Wake Atolls) and three in the Caribbean Sea—mostly protected as wildlife refuges.",
+  "yt", "Mayotte", "Eastern Africa (Indian Ocean)", "Mamoudzou", "Euro", 45.17, -12.83, "An overseas department of France in the Mozambique Channel between Madagascar and mainland Africa, surrounded by one of the world's largest coral lagoons."
+)
+
+country_data <- tibble(file = list.files("flags", pattern = "\\.png$")) |>
+  mutate(code = sub("\\.png$", "", file)) |>
+  left_join(ne_med, by = "code") |>
+  left_join(cl, by = "code") |>
+  left_join(capitals, by = "iso3") |>
+  left_join(extra, by = "code") |>
+  mutate(
+    display_name = coalesce(extra_name, cl_name, name_en, name),
+    region_label = coalesce(
+      extra_region,
+      ifelse(!is.na(subregion) & !is.na(continent), paste0(subregion, " (", continent, ")"), continent)
+    ),
+    capital_label = coalesce(extra_capital, capital_city, "No official capital"),
+    currency_label = coalesce(extra_currency, currency, "Local / regional currency"),
+    lon = round(coalesce(label_x, lon_ex), 2),
+    lat = round(coalesce(label_y, lat_ex), 2),
+    hemisphere = paste0(
+      ifelse(lat >= 0, "Northern", "Southern"), " & ",
+      ifelse(lon >= 0, "Eastern", "Western"), " Hemisphere"
+    ),
+    fact = ifelse(
+      !is.na(extra_fact),
+      extra_fact,
+      paste0(
+        ifelse(!is.na(formal_en) & formal_en != display_name,
+               paste0("Officially known as the ", formal_en, ", "),
+               paste0(display_name, " is ")),
+        "located in ", region_label, ". ",
+        "It covers about ", format(area_km2, big.mark = ",", trim = TRUE), " km² (#", area_rank, " in size globally) ",
+        "with an estimated population of ", format(round(pop_est), big.mark = ",", trim = TRUE), " (#", pop_rank, " worldwide)",
+        ifelse(!is.na(capital_city), paste0(", and its capital city is ", capital_city), ""),
+        ifelse(!is.na(currency), paste0(". Its official currency is the ", currency), ""),
+        ifelse(!is.na(name_ja) & !is.na(name_ar),
+               paste0(". Around the world, its name is written as \"", name_fr, "\" in French, \"", name_ar, "\" in Arabic, and \"", name_ja, "\" in Japanese."),
+               ".")
+      )
+    )
+  ) |>
+  select(
+    file, code,
+    name = display_name,
+    region = region_label,
+    capital = capital_label,
+    currency = currency_label,
+    hemisphere, lon, lat, fact
+  ) |>
+  arrange(name)
+
+ojs_define(
+  countries_raw = country_data,
+  world_geojson = world_geojson
+)
+```
+
+```{ojs}
+// Convert R data frame and GeoJSON into JavaScript objects
+countries = transpose(countries_raw)
+world = JSON.parse(world_geojson)
+
+// Let the user select a country from the dropdown or click "Surprise Me!"
+mutable picked = countries.find(d => d.code === "us") ?? countries[0]
+
+viewof dropdown = Inputs.select(countries, {
+  label: "Select a country or territory:",
+  format: d => `${d.name} (${d.code.toUpperCase()})`,
+  value: picked
+})
+
+viewof randomBtn = Inputs.button("🎲 Surprise Me (Random Flag)", {
+  reduce: () => {
+    const idx = Math.floor(Math.random() * countries.length);
+    mutable picked = countries[idx];
+  }
+})
+```
+
+```{ojs}
+// Keep selected synced when the user picks from the dropdown
+selected = dropdown
+```
+
+```{ojs}
+// Deterministic pseudo-random helper so each country gets consistent distractors
+function makeOptions(correct, pool, seedStr) {
+  let hash = 0;
+  for (let i = 0; i < seedStr.length; i++) {
+    hash = (hash * 31 + seedStr.charCodeAt(i)) >>> 0;
+  }
+  const others = Array.from(new Set(pool.filter(x => x && x !== correct)));
+  const chosen = [];
+  let step = 0;
+  while (chosen.length < 3 && others.length > 0) {
+    const idx = (hash + step * 97) % others.length;
+    const candidate = others[idx];
+    if (!chosen.includes(candidate)) chosen.push(candidate);
+    step++;
+  }
+  const all = [correct, ...chosen];
+  return all.sort((a, b) => {
+    const ha = (a.charCodeAt(0) * 17 + hash) % 101;
+    const hb = (b.charCodeAt(0) * 17 + hash) % 101;
+    return ha - hb || a.localeCompare(b);
+  });
+}
+
+regionOptions = makeOptions(
+  selected.region,
+  countries.map(d => d.region),
+  selected.code + "-reg"
+)
+
+capitalOptions = makeOptions(
+  selected.capital,
+  countries.map(d => d.capital).filter(c => c !== "No official capital"),
+  selected.code + "-cap"
+)
+
+currencyOptions = makeOptions(
+  selected.currency,
+  countries.map(d => d.currency).filter(c => c !== "Local / regional currency"),
+  selected.code + "-cur"
+)
+```
+
+### 🏳️ Flag & Country Trivia
+
+Test your knowledge about **${selected.name}** below! Pick an answer for each trivia question to unlock your score and the full country profile.
+
+```{ojs}
+// Display the flag next to the interactive trivia quiz
+html`<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; align-items: center; margin: 1rem 0;">
+  <div>
+    <h3 style="margin-top: 0;">${selected.name} (${selected.code.toUpperCase()})</h3>
+    <img src="flags/${selected.file}" alt="Flag of ${selected.name}" style="max-width: 100%; max-height: 250px; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.08);">
+  </div>
+  <div style="background: #f0f4f8; padding: 1.1rem; border-radius: 8px; border-left: 4px solid #1d3557;">
+    <strong>🧭 Quick Hint:</strong> Located in the <em>${selected.hemisphere}</em> at coordinates (${selected.lat}°, ${selected.lon}°). Answer the 3 questions below!
+  </div>
+</div>`
+```
+
+```{ojs}
+viewof ansRegion = Inputs.radio(regionOptions, {
+  label: `1. Which region is ${selected.name} in?`
+})
+
+viewof ansCapital = Inputs.radio(capitalOptions, {
+  label: `2. What is the capital of ${selected.name}?`
+})
+
+viewof ansCurrency = Inputs.radio(currencyOptions, {
+  label: `3. Which currency is used in ${selected.name}?`
+})
+```
+
+```{ojs}
+// Check answers and show interactive feedback + interesting facts
+{
+  const checks = [
+    {
+      num: 1,
+      topic: "Region",
+      ans: ansRegion,
+      correct: selected.region
+    },
+    {
+      num: 2,
+      topic: "Capital",
+      ans: ansCapital,
+      correct: selected.capital
+    },
+    {
+      num: 3,
+      topic: "Currency",
+      ans: ansCurrency,
+      correct: selected.currency
+    }
+  ];
+
+  const answeredCount = checks.filter(c => c.ans !== null && c.ans !== undefined).length;
+  const correctCount = checks.filter(c => c.ans === c.correct).length;
+
+  return html`<div style="background: #f8f9fa; padding: 1.25rem; border-radius: 8px; border-left: 4px solid ${correctCount === 3 ? "#2a9d8f" : "#e63946"}; margin: 1rem 0;">
+    <h4 style="margin-top: 0;">Trivia Score: ${correctCount} / 3 (${answeredCount} answered)</h4>
+    <ul style="margin-bottom: 1rem;">
+      ${checks.map(c => {
+        if (!c.ans) return html`<li><strong>Q${c.num} (${c.topic}):</strong> <em>Select an answer above</em></li>`;
+        if (c.ans === c.correct) return html`<li style="color: #1b7a6e;"><strong>Q${c.num} (${c.topic}):</strong> ✅ Correct! (${c.correct})</li>`;
+        return html`<li style="color: #c1121f;"><strong>Q${c.num} (${c.topic}):</strong> ❌ "${c.ans}" is not right — try another choice!</li>`;
+      })}
+    </ul>
+    <details ${answeredCount > 0 ? "open" : ""}>
+      <summary style="cursor: pointer; font-weight: bold; color: #1d3557;">📖 Interesting Facts about ${selected.name} (click to toggle)</summary>
+      <p style="margin-top: 0.75rem; margin-bottom: 0; line-height: 1.55;">${selected.fact}</p>
+    </details>
+  </div>`;
+}
+```
+
+### 🌍 Interactive World Map
+
+Switch between a full world map and a rotatable 3D globe centered on **${selected.name}**, and hover over any country to inspect it!
+
+```{ojs}
+viewof mapProjection = Inputs.radio(
+  ["Equal-Earth World Map", "3D Globe (Centered on Country)"],
+  { label: "Map View:", value: "Equal-Earth World Map" }
+)
+```
+
+```{ojs}
+// Draw an interactive map with hover tooltips and a projection toggle
+Plot.plot({
+  title: `Where ${selected.name} is in the world (${selected.lat}°, ${selected.lon}°)`,
+  projection: mapProjection === "3D Globe (Centered on Country)"
+    ? { type: "orthographic", rotate: [-selected.lon, -selected.lat] }
+    : "equal-earth",
+  width: 860,
+  height: mapProjection === "3D Globe (Centered on Country)" ? 520 : 460,
+  marks: [
+    Plot.sphere({ fill: "#eef6fa", stroke: "#b8d4e3" }),
+    Plot.graticule({ strokeOpacity: 0.18 }),
+    Plot.geo(world, {
+      fill: d => d.properties.code === selected.code ? "#e63946" : "#d8e2dc",
+      stroke: "#ffffff",
+      strokeWidth: 0.5,
+      title: d => `${d.properties.name} (${d.properties.code.toUpperCase()})`
+    }),
+    Plot.dot([selected], {
+      x: "lon",
+      y: "lat",
+      r: 8,
+      fill: "#e63946",
+      stroke: "#ffffff",
+      strokeWidth: 2.5,
+      tip: true,
+      title: d => `${d.name}\nRegion: ${d.region}\nCapital: ${d.capital}`
+    }),
+    Plot.text([selected], {
+      x: "lon",
+      y: "lat",
+      text: d => d.name,
+      dy: -14,
+      fontWeight: "bold",
+      fill: "#1d3557",
+      stroke: "#ffffff",
+      strokeWidth: 3
+    })
+  ]
+})
+```
